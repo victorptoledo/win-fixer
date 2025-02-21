@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"fyne.io/fyne/v2/theme"
 	"io"
 	"log"
 	"os"
@@ -14,6 +13,8 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -23,7 +24,6 @@ var (
 	logger          *log.Logger
 )
 
-// Configuração do logger
 func setupLogger() {
 	logFile, err := os.OpenFile("program.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -32,9 +32,9 @@ func setupLogger() {
 
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	logger = log.New(multiWriter, "", log.Ldate|log.Ltime|log.Lshortfile)
+	logger.Println("[INFO] Logger inicializado com sucesso.")
 }
 
-// Verifica se o programa está sendo executado como administrador
 func isAdmin() bool {
 	_, err := exec.Command("cmd", "/C", "net session").Output()
 	if err != nil {
@@ -45,11 +45,10 @@ func isAdmin() bool {
 	return true
 }
 
-// Executa um comando no terminal
 func runCommand(name string, args ...string) error {
 	logger.Printf("[INFO] Executando comando: %s %v", name, args)
 	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true} // Esconde a janela do terminal
 	err := cmd.Run()
 	if err != nil {
 		logger.Printf("[ERROR] Falha ao executar comando %s: %v", name, err)
@@ -64,14 +63,17 @@ func main() {
 
 	if !isAdmin() {
 		logger.Println("[ERROR] Este programa precisa ser executado como administrador.")
+		dialog.ShowError(fmt.Errorf("este programa precisa ser executado como administrador"), nil)
 		return
 	}
 
+	// Inicializa a aplicação usando o ID personalizado
 	myApp := app.NewWithID("win-fixer")
 	myWindow := myApp.NewWindow("Monitoria do Sistema")
 
+	// Elementos da interface gráfica
 	logText := widget.NewMultiLineEntry()
-	logText.Disable()
+	logText.Disabled()
 	logText.SetText("Iniciando a execução dos comandos...\n")
 
 	progressBar := widget.NewProgressBarInfinite()
@@ -88,7 +90,7 @@ func main() {
 	})
 	cancelButton.Disable()
 
-	startButton := &widget.Button{}
+	var startButton *widget.Button
 	startButton = widget.NewButton("Iniciar Manutenção", func() {
 		startButton.Disable()
 		cancelButton.Enable()
@@ -129,6 +131,7 @@ func main() {
 				}
 				mu.Unlock()
 
+				logger.Printf("[INFO] Executando comando: %s %v", command.name, command.args)
 				logText.SetText(logText.Text + fmt.Sprintf("Executando: %s %v\n", command.name, command.args))
 				err := runCommand(command.name, command.args...)
 				if err != nil {
@@ -139,9 +142,24 @@ func main() {
 
 				time.Sleep(1 * time.Second)
 			}
+
+			dialog.ShowConfirm("Reinicialização Necessária", "Todos os comandos foram concluídos. Deseja reiniciar o sistema agora?", func(restart bool) {
+				if restart {
+					logger.Println("[INFO] Reiniciando o sistema...")
+					err := runCommand("shutdown", "/r", "/t", "0")
+					if err != nil {
+						return
+					}
+				} else {
+					logger.Println("[INFO] Reinicialização cancelada pelo usuário.")
+					logText.SetText(logText.Text + "Reinicialização cancelada pelo usuário.\n")
+					statusLabel.SetText("Status: Concluído.")
+				}
+			}, myWindow)
 		}()
 	})
 
+	// Componentes da interface
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Monitoria do Sistema", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		logText,
@@ -152,6 +170,6 @@ func main() {
 
 	myWindow.SetContent(content)
 	myWindow.Resize(fyne.NewSize(600, 400))
-	myWindow.SetIcon(theme.ComputerIcon())
+	myWindow.SetIcon(theme.ComputerIcon()) // Ícone do sistema
 	myWindow.ShowAndRun()
 }
