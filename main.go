@@ -2,50 +2,60 @@ package main
 
 import (
 	"fmt"
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
+	"fyne.io/fyne/v2/theme"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 )
 
-var logger *log.Logger
+var (
+	cancelExecution bool
+	mu              sync.Mutex
+	logger          *log.Logger
+)
 
+// Configuração do logger
 func setupLogger() {
-	logFile, err := os.OpenFile("win-fixer.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile("program.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		logger.Fatalf("[ERROR] Falha ao criar o arquivo de log: %v", err)
+		log.Fatalf("[ERROR] Falha ao configurar o logger: %v", err)
 	}
 
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	logger = log.New(multiWriter, "", log.Ldate|log.Ltime|log.Lshortfile)
 }
 
+// Verifica se o programa está sendo executado como administrador
 func isAdmin() bool {
 	_, err := exec.Command("cmd", "/C", "net session").Output()
 	if err != nil {
-		log.Println("[WARN] O programa não está sendo executado como administrador.")
+		logger.Printf("[WARN] O programa não está sendo executado como administrador: %v", err)
 		return false
 	}
 	logger.Println("[INFO] O programa está sendo executado como administrador.")
 	return true
 }
 
+// Executa um comando no terminal
 func runCommand(name string, args ...string) error {
-	logger.Printf("[INFO] Executando comando: %s %v\n", name, args)
+	logger.Printf("[INFO] Executando comando: %s %v", name, args)
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	err := cmd.Run()
 	if err != nil {
-		logger.Printf("[ERROR] Falha ao executar comando: %s %v\n", name, args)
+		logger.Printf("[ERROR] Falha ao executar comando %s: %v", name, err)
 		return err
 	}
-	logger.Printf("[INFO] Comando executado com sucesso: %s %v\n", name, args)
+	logger.Printf("[INFO] Comando concluído com sucesso: %s", name)
 	return nil
 }
 
@@ -58,43 +68,90 @@ func main() {
 	}
 
 	myApp := app.NewWithID("win-fixer")
-	myWindow := myApp.NewWindow("Win Fixer")
+	myWindow := myApp.NewWindow("Monitoria do Sistema")
 
 	logText := widget.NewMultiLineEntry()
+	logText.Disable()
 	logText.SetText("Iniciando a execução dos comandos...\n")
 
-	startButton := widget.NewButton("Iniciar manutenção", func() {
-		logger.Println("[INFO] Iniciando a execução dos comandos via interface gráfica...")
-		logText.Append("Executando comandos...\n")
+	progressBar := widget.NewProgressBarInfinite()
+	progressBar.Hide()
 
-		commands := []struct {
-			name string
-			args []string
-		}{
-			{"sfc", []string{"/scannow"}},
-			{"DISM", []string{"/Online", "/Cleanup-Image", "/RestoreHealth"}},
-		}
+	statusLabel := widget.NewLabel("Status: Aguardando início...")
 
-		for _, command := range commands {
-			logText.Append(fmt.Sprintf("[INFO] Executando comando: %s %v\n", command.name, command.args))
-			err := runCommand(command.name, command.args...)
-			if err != nil {
-				logText.Append(fmt.Sprintf("[ERROR] Falha ao executar comando: %s %v\n", command.name, command.args))
-				logger.Printf("[ERROR] Falha ao executar comando: %s %v\n", command.name, command.args)
-			} else {
-				logText.Append(fmt.Sprintf("[INFO] Comando executado com sucesso: %s %v\n", command.name, command.args))
+	cancelButton := widget.NewButton("Cancelar Execução", func() {
+		mu.Lock()
+		cancelExecution = true
+		mu.Unlock()
+		statusLabel.SetText("Status: Execução cancelada pelo usuário.")
+		progressBar.Hide()
+	})
+	cancelButton.Disable()
+
+	startButton := &widget.Button{}
+	startButton = widget.NewButton("Iniciar Manutenção", func() {
+		startButton.Disable()
+		cancelButton.Enable()
+		progressBar.Show()
+		statusLabel.SetText("Status: Executando comandos...")
+		cancelExecution = false
+
+		go func() {
+			defer func() {
+				startButton.Enable()
+				cancelButton.Disable()
+				progressBar.Hide()
+			}()
+
+			commands := []struct {
+				name string
+				args []string
+			}{
+				{"sfc", []string{"/scannow"}},
+				{"DISM", []string{"/Online", "/Cleanup-Image", "/RestoreHealth"}},
+				{"winget", []string{"upgrade", "--all"}},
+				{"cmd", []string{"/C", "del /S /Q %TEMP%\\*"}},
+				{"ipconfig", []string{"/flushdns"}},
+				{"ipconfig", []string{"/release"}},
+				{"ipconfig", []string{"/renew"}},
+				{"defrag", []string{"C:", "/U", "/V"}},
+				{"chkdsk", []string{"C:", "/F", "/R"}},
+				{"wevtutil", []string{"cl", "Application"}},
 			}
-			time.Sleep(1 * time.Second)
-		}
+
+			for _, command := range commands {
+				mu.Lock()
+				if cancelExecution {
+					mu.Unlock()
+					logger.Println("[INFO] Execução cancelada pelo usuário.")
+					logText.SetText(logText.Text + "Execução cancelada pelo usuário.\n")
+					return
+				}
+				mu.Unlock()
+
+				logText.SetText(logText.Text + fmt.Sprintf("Executando: %s %v\n", command.name, command.args))
+				err := runCommand(command.name, command.args...)
+				if err != nil {
+					logText.SetText(logText.Text + fmt.Sprintf("Erro ao executar %s: %v\n", command.name, err))
+				} else {
+					logText.SetText(logText.Text + fmt.Sprintf("%s concluído com sucesso.\n", command.name))
+				}
+
+				time.Sleep(1 * time.Second)
+			}
+		}()
 	})
 
 	content := container.NewVBox(
-		widget.NewLabel("Win Fixer"),
+		widget.NewLabelWithStyle("Monitoria do Sistema", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		logText,
-		startButton,
+		progressBar,
+		statusLabel,
+		container.NewHBox(startButton, cancelButton),
 	)
 
 	myWindow.SetContent(content)
-	myWindow.Resize(fyne.NewSize(400, 100))
+	myWindow.Resize(fyne.NewSize(600, 400))
+	myWindow.SetIcon(theme.ComputerIcon())
 	myWindow.ShowAndRun()
 }
